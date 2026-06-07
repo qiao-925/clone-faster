@@ -110,7 +110,7 @@ def _render_all() -> None:
 def _render_loop() -> None:
     while not _phase_done.is_set():
         _render_all()
-        time.sleep(0.2)
+        time.sleep(0.1)
 
 
 def _parse_git_pct(line: str) -> Optional[int]:
