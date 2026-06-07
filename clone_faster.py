@@ -51,48 +51,59 @@ _tasks: List[dict] = []
 _status_lock = threading.Lock()
 _phase_done = threading.Event()
 _lines_drawn = 0
+_total_done = 0
+_total_fail = 0
 
 
 def _render_all() -> None:
-    """只显示未完成的任务，最多 10 行。"""
+    """总进度条 + 最多 9 个活跃仓库的详细进度。"""
     global _lines_drawn
     if not IS_TTY:
         return
 
     with _status_lock:
-        # dedup + 只取活跃任务
         seen: dict = {}
         for t in _tasks:
             seen[t["repo_full"]] = t
-        items = [(v["pct"], v["repo_full"], v.get("status", "")) for v in seen.values()
-                 if v.get("status") != "done"]
-        items.sort(key=lambda x: -x[0])  # 百分比高的排前面
-        items = items[:10]               # 最多 10 行
+        active = [(v["pct"], v["repo_full"]) for v in seen.values() if v.get("status") != "done"]
+        active.sort(key=lambda x: -x[0])
+        active = active[:9]  # 最多 9 行（留 1 行给总进度）
+        total, done, fail = len(_tasks), _total_done, _total_fail
 
     if _lines_drawn:
         sys.stderr.write(f"\033[{_lines_drawn}A")
 
     tw = _term_width()
-    max_name = max((len(rf) for _, rf, _ in items), default=20)
+    items = active
+    max_name = max((len(rf) for _, rf in items), default=20)
     written = 0
 
-    for pct, rf, status in items:
+    # ---- 第一行：总进度 ----
+    total_bar_w = tw - 24
+    total_bar_w = max(10, min(total_bar_w, 60))
+    total_done_pct = int(done / total * 100) if total else 0
+    total_filled = int(done / total * total_bar_w) if total else 0
+    if done < total:
+        arrow = ">" if total_filled < total_bar_w else ""
+        total_bar = "=" * total_filled + arrow + " " * max(0, total_bar_w - total_filled - len(arrow))
+    else:
+        total_bar = "=" * total_bar_w
+
+    tline = f"[{total_bar}] {total_done_pct:3d}% | {done}/{total} done"
+    if fail:
+        tline += f", {fail} failed"
+    sys.stderr.write(f"\033[K{tline[: tw - 1]}\n")
+    written += 1
+
+    # ---- 后续行：每个活跃仓库 ----
+    for pct, rf in items:
         bar_w = tw - 14 - max_name
         bar_w = max(10, min(bar_w, 50))
         filled = int(pct / 100 * bar_w) if pct else 0
 
-        if pct >= 100:
-            bar = "=" * bar_w
-            sfx = " done"
-        elif pct > 0:
-            arrow = ">" if filled < bar_w else ""
-            bar = "=" * filled + arrow + " " * max(0, bar_w - filled - len(arrow))
-            sfx = ""
-        else:
-            bar = " " * bar_w
-            sfx = ""
-
-        line = f"[{bar}] {pct:3d}% | {rf.ljust(max_name)[:max_name]}{sfx}"
+        arrow = ">" if filled < bar_w else ""
+        bar = "=" * filled + arrow + " " * max(0, bar_w - filled - len(arrow))
+        line = f"  [{bar}] {pct:3d}% | {rf.ljust(max_name)[:max_name]}"
         sys.stderr.write(f"\033[K{line[: tw - 1]}\n")
         written += 1
 
@@ -321,40 +332,51 @@ def _clone_one(task: dict, token: str, use_ssh: bool, partial: bool) -> Tuple[bo
     if partial:
         clone_args.append("--filter=blob:none")
 
-    for url, env in candidates:
+    max_retries = 3
+    for attempt in range(max_retries):
         if _shutdown.is_set():
             return False, "已取消"
 
-        try:
-            p = subprocess.Popen(
-                clone_args + [url, str(target)],
-                env=env, stderr=subprocess.PIPE, text=True, bufsize=1,
-            )
-        except Exception:
-            shutil.rmtree(target, ignore_errors=True)
-            continue
+        # 重置进度，避免上次失败残留
+        task["pct"] = 0
 
-        def _read_stderr():
+        for url, env in candidates:
+            if _shutdown.is_set():
+                return False, "已取消"
+
             try:
-                for line in p.stderr:
-                    pct = _parse_git_pct(line)
-                    if pct is not None:
-                        with _status_lock:
-                            task["pct"] = pct
+                p = subprocess.Popen(
+                    clone_args + [url, str(target)],
+                    env=env, stderr=subprocess.PIPE, text=True, bufsize=1,
+                )
             except Exception:
-                pass
+                shutil.rmtree(target, ignore_errors=True)
+                continue
 
-        reader = threading.Thread(target=_read_stderr, daemon=True)
-        reader.start()
-        p.wait()
-        reader.join(timeout=2)
+            def _read_stderr():
+                try:
+                    for line in p.stderr:
+                        pct = _parse_git_pct(line)
+                        if pct is not None:
+                            with _status_lock:
+                                task["pct"] = pct
+                except Exception:
+                    pass
 
-        if p.returncode == 0:
-            with _status_lock:
-                task["pct"] = 100
-                task["status"] = "done"
-            return True, "已克隆"
-        shutil.rmtree(target, ignore_errors=True)
+            reader = threading.Thread(target=_read_stderr, daemon=True)
+            reader.start()
+            p.wait()
+            reader.join(timeout=2)
+
+            if p.returncode == 0:
+                with _status_lock:
+                    task["pct"] = 100
+                    task["status"] = "done"
+                return True, "已克隆"
+            shutil.rmtree(target, ignore_errors=True)
+
+        if attempt < max_retries - 1:
+            time.sleep(1 << attempt)  # 1s, 2s
 
     with _status_lock:
         task["pct"] = 100
@@ -373,9 +395,11 @@ def _parallel_clone(
     if not total:
         return 0, 0, []
 
-    global _tasks, _lines_drawn, _phase_done
+    global _tasks, _lines_drawn, _phase_done, _total_done, _total_fail
     _tasks = tasks
     _lines_drawn = 0
+    _total_done = 0
+    _total_fail = 0
     _phase_done.clear()
 
     render_t = threading.Thread(target=_render_loop, daemon=True)
@@ -399,8 +423,13 @@ def _parallel_clone(
                 success, detail = False, "异常"
             if success:
                 ok += 1
+                with _status_lock:
+                    _total_done += 1
             else:
                 fail += 1
+                with _status_lock:
+                    _total_fail += 1
+                    _total_done += 1
                 failed.append((t["repo_full"], t["repo_name"], detail))
 
     _phase_done.set()
