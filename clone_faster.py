@@ -56,7 +56,7 @@ _total_fail = 0
 
 
 def _render_all() -> None:
-    """总进度条 + 最多 9 个活跃仓库的详细进度。"""
+    """总进度条常驻 + 最多 9 个活跃仓库的详细进度。"""
     global _lines_drawn
     if not IS_TTY:
         return
@@ -67,27 +67,23 @@ def _render_all() -> None:
             seen[t["repo_full"]] = t
         active = [(v["pct"], v["repo_full"]) for v in seen.values() if v.get("status") != "done"]
         active.sort(key=lambda x: -x[0])
-        active = active[:9]  # 最多 9 行（留 1 行给总进度）
+        active = active[:9]
         total, done, fail = len(_tasks), _total_done, _total_fail
 
     if _lines_drawn:
         sys.stderr.write(f"\033[{_lines_drawn}A")
 
     tw = _term_width()
-    items = active
-    max_name = max((len(rf) for _, rf in items), default=20)
+    max_name = max((len(rf) for _, rf in active), default=20)
     written = 0
 
-    # ---- 第一行：总进度 ----
+    # ---- 第一行：总进度（始终显示） ----
     total_bar_w = tw - 24
     total_bar_w = max(10, min(total_bar_w, 60))
     total_done_pct = int(done / total * 100) if total else 0
     total_filled = int(done / total * total_bar_w) if total else 0
-    if done < total:
-        arrow = ">" if total_filled < total_bar_w else ""
-        total_bar = "=" * total_filled + arrow + " " * max(0, total_bar_w - total_filled - len(arrow))
-    else:
-        total_bar = "=" * total_bar_w
+    arrow = ">" if done < total and total_filled < total_bar_w else ""
+    total_bar = "=" * total_filled + arrow + " " * max(0, total_bar_w - total_filled - len(arrow))
 
     tline = f"[{total_bar}] {total_done_pct:3d}% | {done}/{total} done"
     if fail:
@@ -96,7 +92,7 @@ def _render_all() -> None:
     written += 1
 
     # ---- 后续行：每个活跃仓库 ----
-    for pct, rf in items:
+    for pct, rf in active:
         bar_w = tw - 14 - max_name
         bar_w = max(10, min(bar_w, 50))
         filled = int(pct / 100 * bar_w) if pct else 0
@@ -114,7 +110,7 @@ def _render_all() -> None:
 def _render_loop() -> None:
     while not _phase_done.is_set():
         _render_all()
-        time.sleep(0.1)
+        time.sleep(0.5)
 
 
 def _parse_git_pct(line: str) -> Optional[int]:
@@ -434,10 +430,11 @@ def _parallel_clone(
 
     _phase_done.set()
     render_t.join(timeout=2)
-    if IS_TTY and _lines_drawn:
-        sys.stderr.write(f"\033[{_lines_drawn}A\033[J")
+    # 最终刷新：总进度常驻，活跃行自动消失
+    _render_all()
+    if IS_TTY:
+        sys.stderr.write("\n")
         sys.stderr.flush()
-        _lines_drawn = 0
 
     return ok, fail, failed
 
