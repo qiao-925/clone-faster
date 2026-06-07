@@ -36,10 +36,10 @@ C_GREEN  = "\033[32m"
 C_RED    = "\033[31m"
 C_CYAN   = "\033[36m"
 C_RESET  = "\033[0m"
-BOLD     = "\033[1m"
 
-BAR      = "█" if _HAS_UNICODE else "="
-EMPTY    = "░" if _HAS_UNICODE else "-"
+BAR      = "=" if _HAS_UNICODE else "="
+EMPTY    = " " if _HAS_UNICODE else "-"
+DASH     = ">" if _HAS_UNICODE else ">"
 
 
 def _c(c: str, msg: str) -> str:
@@ -68,13 +68,20 @@ _lines_drawn = 0
 
 
 def _render_all() -> None:
-    """Redraw all task progress lines in-place."""
+    """Redraw at most the 10 newest in-progress task lines in-place."""
     global _lines_drawn
     if not IS_TTY:
         return
 
     with _status_lock:
-        items = [(t.get("pct", 0), t.get("status", ""), t["repo_full"]) for t in _tasks]
+        # dedup by repo_full, keep latest
+        seen: dict = {}
+        for t in _tasks:
+            seen[t["repo_full"]] = t
+        items = [(v.get("pct", 0), v.get("status", ""), v["repo_full"]) for v in seen.values()]
+        # active first, then newest (reverse list)
+        items.sort(key=lambda x: (0 if x[1] == "" else 1, x[0]))
+        items = items[-10:]  # max 10 lines
 
     if _lines_drawn:
         sys.stderr.write(f"\033[{_lines_drawn}A")
@@ -84,9 +91,9 @@ def _render_all() -> None:
     written = 0
 
     for pct, status, rf in items:
-        # fixed: [ ]  100% | name  ✓  = 1 + 1 + 1 + 4 + 3 + max_name + 3  ≈ 13 + max_name
-        bar_w = tw - 13 - max_name
-        bar_w = max(8, min(bar_w, 40))
+        # "[...] 100% | name  ✓" = 1 + 1 + 1 + 5 + 3 + max_name + 3 = 14 + max_name
+        bar_w = tw - 14 - max_name
+        bar_w = max(10, min(bar_w, 50))
 
         filled = int(pct / 100 * bar_w) if pct else 0
 
@@ -97,7 +104,7 @@ def _render_all() -> None:
             bar = BAR * filled + EMPTY * (bar_w - filled)
             sfx = _c(C_RED, " ✗")
         elif pct > 0:
-            arrow = ">" if filled < bar_w else ""
+            arrow = DASH if filled < bar_w else ""
             bar = BAR * filled + arrow + EMPTY * max(0, bar_w - filled - len(arrow))
             sfx = ""
         else:
