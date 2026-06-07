@@ -3,9 +3,7 @@
 用法:
     curl -fsSL https://raw.githubusercontent.com/qiao-925/CloneX/main/clone_faster.py | python3 -
 
-    gh CLI 未安装或未登录时，CloneFaster 自动引导。
-
-前置条件: Python >= 3.10, git, gh CLI
+前置条件: Python >= 3.10, git, gh CLI (gh auth login)
 """
 
 from __future__ import annotations
@@ -14,7 +12,6 @@ import argparse
 import base64
 import json
 import os
-import platform
 import re
 import shutil
 import signal
@@ -100,68 +97,20 @@ def _finish_bar(done: int, total: int, ok: int, fail: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 工具链自检 & 自动安装
+# 认证（gh auth status 校验）
 # ---------------------------------------------------------------------------
 
-IS_WINDOWS = platform.system() == "Windows"
-IS_MACOS   = platform.system() == "Darwin"
-IS_LINUX   = platform.system() == "Linux"
-
-
-def _check_git() -> bool:
-    return shutil.which("git") is not None
-
-
-def _check_gh() -> bool:
-    return shutil.which("gh") is not None
-
-
-def _gh_install_hint() -> str:
-    if IS_MACOS:
-        return "  brew install gh"
-    if IS_LINUX:
-        return (
-            "  # Debian/Ubuntu:\n"
-            "  (type -p wget >/dev/null || sudo apt-get install wget -y) && \\\n"
-            "  sudo mkdir -p -m 755 /etc/apt/keyrings && \\\n"
-            "  out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg && \\\n"
-            "  cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \\\n"
-            "  sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \\\n"
-            "  echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg]"
-            " https://cli.github.com/packages stable main\" |"
-            " sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \\\n"
-            "  sudo apt-get update && sudo apt-get install gh -y"
-        )
-    return "  winget install --id GitHub.cli"
-
-
-def _ensure_toolchain() -> Tuple[Optional[str], str]:
-    """检查 git + gh CLI，若缺失则引导安装。返回 (token, error)。"""
-    if not _check_git():
-        return None, "未找到 git。请先安装: https://git-scm.com/downloads"
-
-    if not _check_gh():
-        hint = _gh_install_hint()
-        _log(f"未找到 GitHub CLI。请安装后运行 gh auth login:\n{hint}", C_RED)
-        return None, "gh CLI 未安装"
-
+def _get_token() -> Tuple[Optional[str], str]:
+    """检查 gh CLI 登录态，返回 (token, error)。"""
     try:
         r = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, timeout=5)
+    except FileNotFoundError:
+        return None, "未找到 gh CLI。请安装: https://cli.github.com/"
     except Exception:
-        r = None
+        return None, "无法运行 gh CLI"
 
-    if not r or r.returncode != 0:
-        _log("gh CLI 未登录。正在启动浏览器登录...", C_CYAN)
-        try:
-            result = subprocess.run(
-                ["gh", "auth", "login", "--hostname", "github.com", "--web"], timeout=120
-            )
-        except subprocess.TimeoutExpired:
-            return None, "登录超时，请手动运行 gh auth login 后重试"
-        except FileNotFoundError:
-            return None, "gh CLI 未安装"
-        if result.returncode != 0:
-            return None, "登录失败，请手动运行 gh auth login 后重试"
+    if r.returncode != 0:
+        return None, "gh CLI 未登录。请运行 gh auth login 后重试"
 
     try:
         r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=5)
@@ -169,7 +118,6 @@ def _ensure_toolchain() -> Tuple[Optional[str], str]:
             return r.stdout.strip(), ""
     except Exception:
         pass
-
     return None, "无法获取 GitHub token"
 
 
@@ -433,7 +381,7 @@ def main() -> int:
     _ensure_signals()
 
     # 1. 自检 & 认证
-    token, err = _ensure_toolchain()
+    token, err = _get_token()
     if not token:
         _log(f"环境检查失败: {err}", C_RED)
         return 1
