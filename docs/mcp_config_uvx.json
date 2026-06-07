@@ -1,9 +1,0 @@
-{
-  "_comment": "CloneX MCP server config for the target PyPI-published form. Requires `clonex-mcp` to be published to PyPI (Phase 2). Until then, use mcp_config_dev.json.",
-  "mcpServers": {
-    "clonex": {
-      "command": "uvx",
-      "args": ["clonex-mcp"]
-    }
-  }
-}
