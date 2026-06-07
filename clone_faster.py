@@ -339,6 +339,8 @@ def _clone_one(task: dict, token: str, use_ssh: bool, partial: bool) -> Tuple[bo
     if partial:
         clone_args.append("--filter=blob:none")
 
+    last_err = ""  # stderr tail from the last failed attempt, for diagnostics
+
     max_retries = 3
     for attempt in range(max_retries):
         if _shutdown.is_set():
@@ -360,9 +362,12 @@ def _clone_one(task: dict, token: str, use_ssh: bool, partial: bool) -> Tuple[bo
                 _rm_anything(target)
                 continue
 
+            stderr_lines: list = []
+
             def _read_stderr():
                 try:
                     for line in p.stderr:
+                        stderr_lines.append(line)
                         pct = _parse_git_pct(line)
                         if pct is not None:
                             with _status_lock:
@@ -380,7 +385,15 @@ def _clone_one(task: dict, token: str, use_ssh: bool, partial: bool) -> Tuple[bo
                     task["pct"] = 100
                     task["status"] = "done"
                 return True, "已克隆"
+
+            # 保留最后几行用于失败诊断
+            tail = "".join(stderr_lines[-3:]).strip()
+            if tail:
+                last_err = tail[-500:].replace("\n", " ")
             _rm_anything(target)
+
+        if _shutdown.is_set():
+            return False, "已取消"
 
         if attempt < max_retries - 1:
             time.sleep(1 << attempt)  # 1s, 2s
@@ -388,7 +401,7 @@ def _clone_one(task: dict, token: str, use_ssh: bool, partial: bool) -> Tuple[bo
     with _status_lock:
         task["pct"] = 100
         task["status"] = "done"
-    return False, "克隆失败"
+    return False, f"克隆失败{'; ' + last_err if last_err else ''}"
 
 
 # ---------------------------------------------------------------------------
