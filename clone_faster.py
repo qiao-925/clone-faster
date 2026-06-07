@@ -110,7 +110,7 @@ def _render_all() -> None:
 def _render_loop() -> None:
     while not _phase_done.is_set():
         _render_all()
-        time.sleep(0.5)
+        time.sleep(0.2)
 
 
 def _parse_git_pct(line: str) -> Optional[int]:
@@ -291,6 +291,17 @@ def _check_repo(repo_path: Path) -> Tuple[bool, str]:
         return False, str(e)
 
 
+def _rm_anything(path: Path) -> None:
+    """Remove path whether it is a file, symlink, or directory."""
+    try:
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+    except OSError:
+        pass
+
+
 def _clone_one(task: dict, token: str, use_ssh: bool, partial: bool) -> Tuple[bool, str]:
     rf, rn, ld = task["repo_full"], task["repo_name"], task["local_dir"]
 
@@ -313,9 +324,9 @@ def _clone_one(task: dict, token: str, use_ssh: bool, partial: bool) -> Tuple[bo
                 task["pct"] = 100
                 task["status"] = "done"
             return True, "已有"
-        shutil.rmtree(target, ignore_errors=True)
+        _rm_anything(target)
     elif target.exists():
-        shutil.rmtree(target, ignore_errors=True)
+        _rm_anything(target)
 
     Path(ld).mkdir(parents=True, exist_ok=True)
 
@@ -346,7 +357,7 @@ def _clone_one(task: dict, token: str, use_ssh: bool, partial: bool) -> Tuple[bo
                     env=env, stderr=subprocess.PIPE, text=True, bufsize=1,
                 )
             except Exception:
-                shutil.rmtree(target, ignore_errors=True)
+                _rm_anything(target)
                 continue
 
             def _read_stderr():
@@ -369,7 +380,7 @@ def _clone_one(task: dict, token: str, use_ssh: bool, partial: bool) -> Tuple[bo
                     task["pct"] = 100
                     task["status"] = "done"
                 return True, "已克隆"
-            shutil.rmtree(target, ignore_errors=True)
+            _rm_anything(target)
 
         if attempt < max_retries - 1:
             time.sleep(1 << attempt)  # 1s, 2s
