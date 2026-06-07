@@ -30,24 +30,10 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 IS_TTY = sys.stderr.isatty()
-_HAS_UNICODE = sys.stdout.encoding and "utf" in sys.stdout.encoding.lower()
-
-C_GREEN  = "\033[32m"
-C_RED    = "\033[31m"
-C_CYAN   = "\033[36m"
-C_RESET  = "\033[0m"
-
-BAR      = "=" if _HAS_UNICODE else "="
-EMPTY    = " " if _HAS_UNICODE else "-"
-DASH     = ">" if _HAS_UNICODE else ">"
 
 
-def _c(c: str, msg: str) -> str:
-    return msg if os.name == "nt" else f"{c}{msg}{C_RESET}"
-
-
-def _log(msg: str, color: str = "") -> None:
-    print(_c(color, msg), file=sys.stderr)
+def _log(msg: str) -> None:
+    print(msg, file=sys.stderr)
 
 
 def _term_width() -> int:
@@ -58,7 +44,7 @@ def _term_width() -> int:
 
 
 # ---------------------------------------------------------------------------
-# 多行进度条（pip / apt 风格）
+# 多行进度条
 # ---------------------------------------------------------------------------
 
 _tasks: List[dict] = []
@@ -68,47 +54,42 @@ _lines_drawn = 0
 
 
 def _render_all() -> None:
-    """Redraw at most the 10 newest in-progress task lines in-place."""
+    """只显示未完成的任务，最多 10 行。"""
     global _lines_drawn
     if not IS_TTY:
         return
 
     with _status_lock:
-        # dedup by repo_full, keep latest
+        # dedup + 只取活跃任务
         seen: dict = {}
         for t in _tasks:
             seen[t["repo_full"]] = t
-        items = [(v.get("pct", 0), v.get("status", ""), v["repo_full"]) for v in seen.values()]
-        # active first, then newest (reverse list)
-        items.sort(key=lambda x: (0 if x[1] == "" else 1, x[0]))
-        items = items[-10:]  # max 10 lines
+        items = [(v["pct"], v["repo_full"], v.get("status", "")) for v in seen.values()
+                 if v.get("status") != "done"]
+        items.sort(key=lambda x: -x[0])  # 百分比高的排前面
+        items = items[:10]               # 最多 10 行
 
     if _lines_drawn:
         sys.stderr.write(f"\033[{_lines_drawn}A")
 
     tw = _term_width()
-    max_name = max((len(rf) for _, _, rf in items), default=20)
+    max_name = max((len(rf) for _, rf, _ in items), default=20)
     written = 0
 
-    for pct, status, rf in items:
-        # "[...] 100% | name  ✓" = 1 + 1 + 1 + 5 + 3 + max_name + 3 = 14 + max_name
+    for pct, rf, status in items:
         bar_w = tw - 14 - max_name
         bar_w = max(10, min(bar_w, 50))
-
         filled = int(pct / 100 * bar_w) if pct else 0
 
-        if status == "✓":
-            bar = BAR * bar_w
-            sfx = _c(C_GREEN, " ✓")
-        elif status == "✗":
-            bar = BAR * filled + EMPTY * (bar_w - filled)
-            sfx = _c(C_RED, " ✗")
+        if pct >= 100:
+            bar = "=" * bar_w
+            sfx = " done"
         elif pct > 0:
-            arrow = DASH if filled < bar_w else ""
-            bar = BAR * filled + arrow + EMPTY * max(0, bar_w - filled - len(arrow))
+            arrow = ">" if filled < bar_w else ""
+            bar = "=" * filled + arrow + " " * max(0, bar_w - filled - len(arrow))
             sfx = ""
         else:
-            bar = EMPTY * bar_w
+            bar = " " * bar_w
             sfx = ""
 
         line = f"[{bar}] {pct:3d}% | {rf.ljust(max_name)[:max_name]}{sfx}"
@@ -210,6 +191,7 @@ def _fetch_all_pages(url_template: str, token: str) -> Tuple[bool, List[dict], s
                 "full_name": repo.get("full_name") or f"{owner_login}/{repo.get('name') or ''}",
                 "private": bool(repo.get("private", False)),
                 "owner_login": owner_login,
+                "size": repo.get("size", 0),
             })
         if len(data) < 100:
             break
@@ -302,8 +284,7 @@ def _check_repo(repo_path: Path) -> Tuple[bool, str]:
         return False, str(e)
 
 
-def _clone_one(task: dict, connections: int, token: str) -> Tuple[bool, str]:
-    """克隆单个仓库，通过解析 git --progress 输出驱动进度条。"""
+def _clone_one(task: dict, token: str, use_ssh: bool, partial: bool) -> Tuple[bool, str]:
     rf, rn, ld = task["repo_full"], task["repo_name"], task["local_dir"]
 
     if _shutdown.is_set():
@@ -314,9 +295,16 @@ def _clone_one(task: dict, connections: int, token: str) -> Tuple[bool, str]:
     if target.exists() and (target / ".git").exists():
         ok, err = _check_repo(target)
         if ok:
+            try:
+                subprocess.run(
+                    ["git", "-C", str(target), "fetch", "--depth", "1", "origin"],
+                    capture_output=True, timeout=30,
+                )
+            except Exception:
+                pass
             with _status_lock:
                 task["pct"] = 100
-                task["status"] = "✓"
+                task["status"] = "done"
             return True, "已有"
         shutil.rmtree(target, ignore_errors=True)
     elif target.exists():
@@ -324,11 +312,14 @@ def _clone_one(task: dict, connections: int, token: str) -> Tuple[bool, str]:
 
     Path(ld).mkdir(parents=True, exist_ok=True)
 
-    use_ssh = _ssh_ok()
     candidates: List[Tuple[str, Optional[Dict[str, str]]]] = []
     if use_ssh:
         candidates.append((f"git@github.com:{rf}.git", None))
     candidates.append((f"https://github.com/{rf}.git", _git_auth_env(token)))
+
+    clone_args = ["git", "clone", "--depth", "1", "--single-branch", "--progress"]
+    if partial:
+        clone_args.append("--filter=blob:none")
 
     for url, env in candidates:
         if _shutdown.is_set():
@@ -336,15 +327,13 @@ def _clone_one(task: dict, connections: int, token: str) -> Tuple[bool, str]:
 
         try:
             p = subprocess.Popen(
-                ["git", "clone", "--depth", "1", "--single-branch", "--progress",
-                 "--jobs", str(connections), url, str(target)],
+                clone_args + [url, str(target)],
                 env=env, stderr=subprocess.PIPE, text=True, bufsize=1,
             )
         except Exception:
             shutil.rmtree(target, ignore_errors=True)
             continue
 
-        # 后台线程读取 git stderr，解析百分比
         def _read_stderr():
             try:
                 for line in p.stderr:
@@ -363,13 +352,13 @@ def _clone_one(task: dict, connections: int, token: str) -> Tuple[bool, str]:
         if p.returncode == 0:
             with _status_lock:
                 task["pct"] = 100
-                task["status"] = "✓"
+                task["status"] = "done"
             return True, "已克隆"
         shutil.rmtree(target, ignore_errors=True)
 
     with _status_lock:
         task["pct"] = 100
-        task["status"] = "✗"
+        task["status"] = "done"
     return False, "克隆失败"
 
 
@@ -378,7 +367,7 @@ def _clone_one(task: dict, connections: int, token: str) -> Tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 def _parallel_clone(
-    tasks: List[dict], parallel_tasks: int, connections: int, token: str,
+    tasks: List[dict], parallel_tasks: int, token: str, use_ssh: bool, partial: bool,
 ) -> Tuple[int, int, List[Tuple[str, str, str]]]:
     total = len(tasks)
     if not total:
@@ -389,7 +378,6 @@ def _parallel_clone(
     _lines_drawn = 0
     _phase_done.clear()
 
-    # 启动进度渲染线程
     render_t = threading.Thread(target=_render_loop, daemon=True)
     render_t.start()
 
@@ -398,7 +386,7 @@ def _parallel_clone(
 
     with ThreadPoolExecutor(max_workers=parallel_tasks) as pool:
         futures = {
-            pool.submit(_clone_one, t, connections, token): t
+            pool.submit(_clone_one, t, token, use_ssh, partial): t
             for t in tasks
         }
         for f in as_completed(futures):
@@ -415,10 +403,8 @@ def _parallel_clone(
                 fail += 1
                 failed.append((t["repo_full"], t["repo_name"], detail))
 
-    # 停止渲染，清掉进度块
     _phase_done.set()
     render_t.join(timeout=2)
-    _render_all()
     if IS_TTY and _lines_drawn:
         sys.stderr.write(f"\033[{_lines_drawn}A\033[J")
         sys.stderr.flush()
@@ -438,7 +424,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--output", default="clone-faster-repos", help="输出目录（默认 ./clone-faster-repos）")
     p.add_argument("--tasks", type=int, default=10, help="并行仓库数（默认 10）")
-    p.add_argument("--connections", type=int, default=20, help="Git 并行连接数（默认 20）")
+    p.add_argument("--partial", action="store_true", help="部分克隆（--filter=blob:none，按需下载 blob）")
+    p.add_argument("--flat", action="store_true", help="平铺到输出目录（默认按 owner 分组）")
     return p
 
 
@@ -448,34 +435,44 @@ def main() -> int:
 
     token, err = _get_token()
     if not token:
-        _log(f"✗ {err}", C_RED)
+        _log(f"✗ {err}")
         return 1
 
     owner, err = _resolve_owner(token)
     if not owner:
-        _log(f"✗ {err}", C_RED)
+        _log(f"✗ {err}")
         return 1
+
+    use_ssh = _ssh_ok()
 
     output_dir = Path(args.output).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    _log(f"{owner} → {output_dir}", C_CYAN)
+    _log(f"{owner} -> {output_dir}")
 
     ok, repos, err = _fetch_user_repos(owner, token)
     if not ok or not repos:
-        _log(f"✗ 拉取失败: {err or '无公开仓库'}", C_RED)
+        _log(f"✗ 拉取失败: {err or '无公开仓库'}")
         return 1
 
-    tasks = [{"repo_full": r["full_name"], "repo_name": r["name"], "local_dir": str(output_dir),
-              "pct": 0, "status": ""} for r in repos]
-    ok_cnt, fail_cnt, failed = _parallel_clone(tasks, args.tasks, args.connections, token)
+    repos.sort(key=lambda r: r.get("size", 0))
+
+    tasks = []
+    for r in repos:
+        local_dir = str(output_dir) if args.flat else str(output_dir / _safe_name(r.get("owner_login", owner)))
+        tasks.append({
+            "repo_full": r["full_name"], "repo_name": r["name"],
+            "local_dir": local_dir, "pct": 0, "status": "",
+        })
+
+    ok_cnt, fail_cnt, failed = _parallel_clone(tasks, args.tasks, token, use_ssh, args.partial)
 
     if failed:
-        print(f"\n{_c(C_RED, f'✗ {fail_cnt} 个失败:')}")
+        print(f"\n✗ {fail_cnt} 个失败:")
         for rf, _rn, detail in failed:
             print(f"  {rf}  ({detail})")
 
-    print(f"\n{_c(C_GREEN, f'✓ {ok_cnt}')}  {_c(C_RED, f'✗ {fail_cnt}')}  /  {len(tasks)} 个仓库")
+    print(f"\n✓ {ok_cnt}  ✗ {fail_cnt}  /  {len(tasks)} 个仓库")
     return 0 if fail_cnt == 0 else 1
 
 
