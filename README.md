@@ -1,4 +1,4 @@
-# CloneFaster
+# clone-faster
 
 > 批量克隆 GitHub 账号/组织下的全部仓库。
 
