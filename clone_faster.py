@@ -1,7 +1,7 @@
 """CloneFaster — 批量高速克隆 GitHub 仓库（零依赖，单文件）。
 
 用法:
-    curl -fsSL https://raw.githubusercontent.com/qiao-925/CloneX/main/clone_faster.py | python3 -
+    curl -fsSL https://raw.githubusercontent.com/qiao-925/clone-faster/main/clone_faster.py | python3 -
 
 前置条件: Python >= 3.10, git, gh CLI (gh auth login)
 """

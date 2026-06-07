@@ -3,7 +3,7 @@
 > 一条命令，批量高速克隆 GitHub 仓库。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/qiao-925/CloneX/main/clone_faster.py | python3 -
+curl -fsSL https://raw.githubusercontent.com/qiao-925/clone-faster/main/clone_faster.py | python3 -
 ```
 
 ## 前置条件
@@ -35,7 +35,7 @@ gh auth status 校验 → gh auth token 拿 token → urllib GET 分页拉仓库
 - `--depth 1 --single-branch` 浅克隆
 - 自适应终端宽度的单行进度条
 
-[`index.html`](index.html) — 宣传页，已部署 [GitHub Pages](https://qiao-925.github.io/CloneX/)。
+[`index.html`](index.html) — 宣传页，已部署 [GitHub Pages](https://qiao-925.github.io/clone-faster/)。
 
 ## 许可
 
