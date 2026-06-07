@@ -22,18 +22,6 @@ curl -fsSL https://raw.githubusercontent.com/qiao-925/clone-faster/main/clone_fa
 --connections N       Git 并行连接数（默认 20）
 ```
 
-## 设计
-
-单文件，423 行，零外部 Python 依赖。
-
-```
-gh auth status → gh auth token → urllib 分页拉仓库列表
-→ ThreadPoolExecutor 并行克隆（SSH 优先 / HTTPS 回退 / 已存在 skip）
-```
-
-- `--depth 1 --single-branch` 浅克隆
-- 终端进度条（非 TTY 自动静默）
-
 ## 许可
 
 MIT
